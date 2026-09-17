@@ -15,64 +15,73 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Fix missing files
+      - name: Find and Fix Project
         run: |
-          echo "=== Fixing keystore ==="
-          # Create debug keystore at all possible locations
+          echo "=== Listing all files ==="
+          ls -la
+          echo "=== Finding gradle files ==="
+          find . -maxdepth 4 -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \) | sort
+          echo "=== Finding gradlew ==="
+          find . -name "gradlew" -type f
+
+          # Find the real project root (where settings.gradle is)
+          PROJECT_DIR=$(find . -name "settings.gradle" -o -name "settings.gradle.kts" | head -1 | xargs dirname 2>/dev/null)
+          if [ -z "$PROJECT_DIR" ]; then
+            PROJECT_DIR=$(find . -name "build.gradle" | head -1 | xargs dirname 2>/dev/null)
+          fi
+          if [ -z "$PROJECT_DIR" ] || [ "$PROJECT_DIR" = "." ]; then
+            PROJECT_DIR="."
+          fi
+          echo "PROJECT_DIR=$PROJECT_DIR" >> $GITHUB_ENV
+          echo "Found project dir: $PROJECT_DIR"
+          ls -la "$PROJECT_DIR"
+
+          # Create keystore in project dir
           mkdir -p ~/.android/
           keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
-          
-          for p in "./debug.keystore" "./app/debug.keystore" "./dakd-jarvis/debug.keystore" "./dakd-jarvis/app/debug.keystore" "dakd-jarvis/dakd-jarvis/debug.keystore" "dakd-jarvis/dakd-jarvis/dakd-jarvis/debug.keystore"; do
-            mkdir -p $(dirname "$p")
-            cp ~/.android/debug.keystore "$p" 2>/dev/null || keytool -genkey -v -keystore "$p" -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
-          done
+          cp ~/.android/debug.keystore "$PROJECT_DIR/debug.keystore" 2>/dev/null || true
+          cp ~/.android/debug.keystore "$PROJECT_DIR/app/debug.keystore" 2>/dev/null || true
+          mkdir -p "$PROJECT_DIR/app"
+          cp ~/.android/debug.keystore "$PROJECT_DIR/app/debug.keystore" 2>/dev/null || true
 
-          echo "=== Fixing GEMINI_API_KEY ==="
-          # Create .env files
-          echo "GEMINI_API_KEY=dummy_key_for_build_12345" > .env
-          echo "GEMINI_API_KEY=dummy_key_for_build_12345" > .env.example
-          if [ -d "dakd-jarvis" ]; then
-            echo "GEMINI_API_KEY=dummy_key_for_build_12345" > dakd-jarvis/.env
-            echo "GEMINI_API_KEY=dummy_key_for_build_12345" > dakd-jarvis/.env.example
-            echo "sdk.dir=$ANDROID_HOME" > dakd-jarvis/local.properties
-          fi
-          if [ -d "app" ]; then
-            echo "GEMINI_API_KEY=dummy_key_for_build_12345" > app/.env
-          fi
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          
-          # Create gradle.properties
-          echo "GEMINI_API_KEY=dummy_key_for_build_12345" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx4g" >> gradle.properties
-          
-          echo "=== Patching AIConfig.kt ==="
-          AI_FILE=$(find . -name "AIConfig.kt" | head -1)
+          # Fix env
+          echo "GEMINI_API_KEY=dummy_key_for_build" > "$PROJECT_DIR/.env"
+          echo "GEMINI_API_KEY=dummy_key_for_build" > "$PROJECT_DIR/.env.example"
+          echo "sdk.dir=$ANDROID_HOME" > "$PROJECT_DIR/local.properties"
+
+          # Patch AIConfig.kt if exists
+          AI_FILE=$(find "$PROJECT_DIR" -name "AIConfig.kt" 2>/dev/null | head -1)
           if [ -f "$AI_FILE" ]; then
-            echo "Found $AI_FILE"
-            # Replace BuildConfig.GEMINI_API_KEY with hardcoded string to allow build
-            sed -i 's/BuildConfig.GEMINI_API_KEY/"dummy_key_for_build_12345"/g' "$AI_FILE" || true
-            sed -i 's/GEMINI_API_KEY/"dummy_key_for_build_12345"/g' "$AI_FILE" || true
-            cat "$AI_FILE"
+            echo "Patching $AI_FILE"
+            sed -i 's/BuildConfig.GEMINI_API_KEY/"dummy_key_for_build"/g' "$AI_FILE" || true
+            sed -i 's/BuildConfig\.GEMINI_API_KEY/"dummy_key_for_build"/g' "$AI_FILE" || true
           fi
+
+          # Also patch build.gradle for keystore if needed
+          echo "Checking build.gradle"
+          cat "$PROJECT_DIR/app/build.gradle" 2>/dev/null | grep -A2 -B2 keystore || true
 
       - name: Build APK
         run: |
-          export GEMINI_API_KEY="dummy_key_for_build_12345"
-          # Find gradlew
-          GRADLEW=$(find . -name "gradlew" -type f | head -1)
-          if [ -n "$GRADLEW" ]; then
-            chmod +x "$GRADLEW"
-            DIR=$(dirname "$GRADLEW")
-            echo "Building from $DIR using $GRADLEW"
-            cd "$DIR"
-            ./gradlew assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build_12345 || ./gradlew assembleDebug --stacktrace
+          echo "Building from $PROJECT_DIR"
+          cd "$PROJECT_DIR"
+          echo "Current dir: $(pwd)"
+          ls -la
+          
+          export GEMINI_API_KEY="dummy_key_for_build"
+          
+          if [ -f "./gradlew" ]; then
+            chmod +x ./gradlew
+            ./gradlew assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build
+          elif [ -f "../gradlew" ]; then
+            chmod +x ../gradlew
+            ../gradlew assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build
           else
-            echo "No gradlew found, using gradle"
-            gradle assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build_12345 || gradle assembleDebug
+            # No wrapper, use gradle directly - need to tell gradle where project is
+            gradle assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build
           fi
         env:
-          GEMINI_API_KEY: dummy_key_for_build_12345
-          ORG_GRADLE_PROJECT_GEMINI_API_KEY: dummy_key_for_build_12345
+          GEMINI_API_KEY: dummy_key_for_build
 
       - name: Upload APK
         if: always()
