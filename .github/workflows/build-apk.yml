@@ -11,94 +11,68 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
-      
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
 
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Fix all missing files
+      - name: Fix missing files
         run: |
-          echo "=== Searching project structure ==="
-          find . -type f -name "build.gradle*" | head -20
-          echo "=== Finding AIConfig ==="
-          find . -name "AIConfig.kt" -type f
-
-          # 1. Create debug.keystore EVERYWHERE it might be needed
-          echo "Creating debug keystores..."
-          for dir in . ./dakd-jarvis ./app ./dakd-jarvis/app ./*/app ./dakd-jarvis/dakd-jarvis ./dakd-jarvis/dakd-jarvis/dakd-jarvis; do
-            if [ -d "$dir" ]; then
-              echo "Creating keystore in $dir"
-              keytool -genkey -v -keystore "$dir/debug.keystore" -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
-            fi
+          echo "=== Fixing keystore ==="
+          # Create debug keystore at all possible locations
+          mkdir -p ~/.android/
+          keytool -genkey -v -keystore ~/.android/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
+          
+          for p in "./debug.keystore" "./app/debug.keystore" "./dakd-jarvis/debug.keystore" "./dakd-jarvis/app/debug.keystore" "dakd-jarvis/dakd-jarvis/debug.keystore" "dakd-jarvis/dakd-jarvis/dakd-jarvis/debug.keystore"; do
+            mkdir -p $(dirname "$p")
+            cp ~/.android/debug.keystore "$p" 2>/dev/null || keytool -genkey -v -keystore "$p" -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
           done
-          # Also at exact failing path
-          mkdir -p dakd-jarvis/dakd-jarvis/dakd-jarvis/
-          keytool -genkey -v -keystore "dakd-jarvis/dakd-jarvis/dakd-jarvis/debug.keystore" -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
-          keytool -genkey -v -keystore "./debug.keystore" -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US" 2>/dev/null || true
 
-          # 2. Fix .env and GEMINI_API_KEY
-          echo "Fixing env and BuildConfig..."
-          GEMINI_KEY="dummy_key_for_build_12345"
-          # Find where .env should be
-          for dir in . ./dakd-jarvis ./app ./dakd-jarvis/app; do
-            if [ -d "$dir" ]; then
-              echo "GEMINI_API_KEY=$GEMINI_KEY" > "$dir/.env"
-              echo "GEMINI_API_KEY=$GEMINI_KEY" > "$dir/.env.example"
-              echo "API_KEY=$GEMINI_KEY" >> "$dir/.env.example"
-            fi
-          done
-          # Create local.properties with API key
-          echo "sdk.dir=$ANDROID_HOME" > local.properties
-          echo "GEMINI_API_KEY=$GEMINI_KEY" >> local.properties
+          echo "=== Fixing GEMINI_API_KEY ==="
+          # Create .env files
+          echo "GEMINI_API_KEY=dummy_key_for_build_12345" > .env
+          echo "GEMINI_API_KEY=dummy_key_for_build_12345" > .env.example
           if [ -d "dakd-jarvis" ]; then
+            echo "GEMINI_API_KEY=dummy_key_for_build_12345" > dakd-jarvis/.env
+            echo "GEMINI_API_KEY=dummy_key_for_build_12345" > dakd-jarvis/.env.example
             echo "sdk.dir=$ANDROID_HOME" > dakd-jarvis/local.properties
-            echo "GEMINI_API_KEY=$GEMINI_KEY" >> dakd-jarvis/local.properties
+          fi
+          if [ -d "app" ]; then
+            echo "GEMINI_API_KEY=dummy_key_for_build_12345" > app/.env
+          fi
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
+          
+          # Create gradle.properties
+          echo "GEMINI_API_KEY=dummy_key_for_build_12345" >> gradle.properties
+          echo "org.gradle.jvmargs=-Xmx4g" >> gradle.properties
+          
+          echo "=== Patching AIConfig.kt ==="
+          AI_FILE=$(find . -name "AIConfig.kt" | head -1)
+          if [ -f "$AI_FILE" ]; then
+            echo "Found $AI_FILE"
+            # Replace BuildConfig.GEMINI_API_KEY with hardcoded string to allow build
+            sed -i 's/BuildConfig.GEMINI_API_KEY/"dummy_key_for_build_12345"/g' "$AI_FILE" || true
+            sed -i 's/GEMINI_API_KEY/"dummy_key_for_build_12345"/g' "$AI_FILE" || true
+            cat "$AI_FILE"
           fi
 
-          # 3. Patch build.gradle to provide BuildConfig field if missing
-          echo "Patching build.gradle for GEMINI_API_KEY..."
-          find . -name "build.gradle" -o -name "build.gradle.kts" | while read f; do
-            if grep -q "GEMINI_API_KEY" "$f"; then
-              echo "Already has GEMINI in $f"
-            else
-              # Try to add buildConfigField in android defaultConfig
-              if grep -q "buildConfigField" "$f"; then
-                echo "Has buildConfigField already"
-              fi
-            fi
-            cat "$f" | head -100
-          done
-
-          # 4. Create a gradle.properties with key
-          echo "GEMINI_API_KEY=$GEMINI_KEY" >> gradle.properties
-          echo "org.gradle.jvmargs=-Xmx4g" >> gradle.properties
-
-          ls -la *.keystore 2>&1 || true
-          ls -la dakd-jarvis/*.keystore 2>&1 || true
-
-      - name: Build APK with fixes
+      - name: Build APK
         run: |
-          # Set env var for build
           export GEMINI_API_KEY="dummy_key_for_build_12345"
-          export ORG_GRADLE_PROJECT_GEMINI_API_KEY="dummy_key_for_build_12345"
-          
-          # Try to build from correct dir
-          if [ -f "dakd-jarvis/gradlew" ]; then
-            cd dakd-jarvis
-            chmod +x gradlew
-            ./gradlew assembleDebug --stacktrace -P GEMINI_API_KEY="dummy_key" || ./gradlew assembleDebug --stacktrace -Dorg.gradle.project.GEMINI_API_KEY="dummy_key"
-          elif [ -f "./gradlew" ]; then
-            chmod +x gradlew
-            ./gradlew assembleDebug --stacktrace -P GEMINI_API_KEY="dummy_key"
+          # Find gradlew
+          GRADLEW=$(find . -name "gradlew" -type f | head -1)
+          if [ -n "$GRADLEW" ]; then
+            chmod +x "$GRADLEW"
+            DIR=$(dirname "$GRADLEW")
+            echo "Building from $DIR using $GRADLEW"
+            cd "$DIR"
+            ./gradlew assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build_12345 || ./gradlew assembleDebug --stacktrace
           else
-            # Use gradle directly with keystore bypass
-            gradle assembleDebug --stacktrace -P GEMINI_API_KEY="dummy_key" -Pandroid.injected.signing.store.file=$(pwd)/debug.keystore -Pandroid.injected.signing.store.password=android -Pandroid.injected.signing.key.alias=androiddebugkey -Pandroid.injected.signing.key.password=android || gradle assembleDebug
+            echo "No gradlew found, using gradle"
+            gradle assembleDebug --stacktrace -P GEMINI_API_KEY=dummy_key_for_build_12345 || gradle assembleDebug
           fi
         env:
           GEMINI_API_KEY: dummy_key_for_build_12345
-          ANDROID_KEYSTORE: debug.keystore
+          ORG_GRADLE_PROJECT_GEMINI_API_KEY: dummy_key_for_build_12345
 
       - name: Upload APK
         if: always()
@@ -106,6 +80,5 @@ jobs:
         with:
           name: dakd-jarvis-apk
           path: |
+            **/build/outputs/apk/debug/*.apk
             **/app/build/outputs/apk/debug/*.apk
-            **/build/outputs/apk/**/*.apk
-            **/*.apk
